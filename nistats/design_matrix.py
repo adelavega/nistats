@@ -164,7 +164,7 @@ def _make_drift(drift_model, frame_times, order=1, period_cut=128.):
 
 
 def _convolve_regressors(paradigm, hrf_model, frame_times, fir_delays=[0],
-                         min_onset=-24):
+                         min_onset=-24, oversampling=None):
     """ Creation of  a matrix that comprises
     the convolution of the conditions onset with a certain hrf model
 
@@ -191,6 +191,10 @@ def _convolve_regressors(paradigm, hrf_model, frame_times, fir_delays=[0],
         Minimal onset relative to frame_times[0] (in seconds) events
         that start before frame_times[0] + min_onset are not considered.
 
+    oversampling : int, optional
+        oversampling factor to perform the convolution.
+        By default, set to 1 for FIR, and 16 for other hrf_models.
+
     Returns
     -------
     regressor_matrix : array of shape (n_scans, n_regressors),
@@ -209,10 +213,13 @@ def _convolve_regressors(paradigm, hrf_model, frame_times, fir_delays=[0],
     """
     regressor_names = []
     regressor_matrix = None
-    if hrf_model == 'fir':
-        oversampling = 1
-    else:
-        oversampling = 16
+    if oversampling is None:
+        if hrf_model == 'fir':
+            oversampling = 1
+        else:
+            oversampling = 16
+
+
 
     trial_type, onset, duration, modulation = check_paradigm(paradigm)
     for condition in np.unique(trial_type):
@@ -274,7 +281,7 @@ def _full_rank(X, cmax=1e15):
 def make_design_matrix(
     frame_times, paradigm=None, hrf_model='glover',
     drift_model='cosine', period_cut=128, drift_order=1, fir_delays=[0],
-    add_regs=None, add_reg_names=None, min_onset=-24):
+    add_regs=None, add_reg_names=None, min_onset=-24, oversampling=None):
     """Generate a design matrix from the input parameters
 
     Parameters
@@ -332,6 +339,10 @@ def make_design_matrix(
         Minimal onset relative to frame_times[0] (in seconds)
         events that start before frame_times[0] + min_onset are not considered.
 
+    oversampling : int, optional
+        oversampling factor to perform the convolution.
+        By default, set to 1 for FIR, and 16 for other hrf_models.
+
     Returns
     -------
     design_matrix : DataFrame instance,
@@ -369,7 +380,8 @@ def make_design_matrix(
         if isinstance(hrf_model, _basestring):
             hrf_model = hrf_model.lower()
         matrix, names = _convolve_regressors(
-            paradigm, hrf_model, frame_times, fir_delays, min_onset)
+            paradigm, hrf_model, frame_times, fir_delays, min_onset,
+            oversampling=oversampling)
 
     # step 2: additional regressors
     if add_regs is not None:
