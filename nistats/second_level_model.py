@@ -253,6 +253,7 @@ def _learn_masker(model, second_level_input):
     else:
         # In this case design matrix had to be provided
         sample_map = mean_img(second_level_input)
+        subjects_label = None
 
     # Learn the mask. Assume the first level imgs have been masked.
     if not isinstance(model.mask_img, NiftiMasker):
@@ -601,8 +602,9 @@ class FixedEffectsModel(BaseEstimator, TransformerMixin, CacheMixin):
         if self.verbose > 0:
             sys.stderr.write("Preparing fixed effects model")
 
-        if not isinstance(effect_inputs[0], Nifti1Image):
-            raise ValueError("Input must be list of nifti images")
+        if not isinstance(effect_inputs[0], (str, Nifti1Image)):
+            raise ValueError("Input must be list of nifti images, or "
+                             "paths to images")
 
         self.masker_, subjects_label = _learn_masker(self, effect_inputs)
 
@@ -642,9 +644,9 @@ class FixedEffectsModel(BaseEstimator, TransformerMixin, CacheMixin):
         _check_output_type(output_type, valid_types)
 
         # Mask inputs
-        masked_effects = self.masker_.transform(self._effect_inputs_)
+        masked_effects = self.masker_.transform(self.effect_inputs_)
         masked_effects = np.split(masked_effects, masked_effects.shape[0])
-        masked_vars = self.masker_.transform(self._variance_inputs_)
+        masked_vars = self.masker_.transform(self.variance_inputs_)
         masked_vars = np.split(masked_vars, masked_vars.shape[0])
 
         # Compute contrasts
