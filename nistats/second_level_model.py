@@ -608,6 +608,13 @@ class FixedEffectsModel(BaseEstimator, TransformerMixin, CacheMixin):
 
         self.masker_, subjects_label = _learn_masker(self, effect_inputs)
 
+        # Mask inputs
+        effect_inputs_ = self.masker_.transform(self.effect_inputs_)
+        effect_inputs_ = np.split(effect_inputs_, effect_inputs_.shape[0])
+        variance_inputs_ = self.masker_.transform(self.variance_inputs_)
+        variance_inputs_ = np.split(
+            variance_inputs_, variance_inputs_.shape[0])
+
         # Report progress
         if self.verbose > 0:
             sys.stderr.write("\nComputation of second level model done in "
@@ -615,8 +622,7 @@ class FixedEffectsModel(BaseEstimator, TransformerMixin, CacheMixin):
 
         return self
 
-    def compute_contrast(
-            self, output_type='z_score'):
+    def compute_contrast(self, output_type='z_score'):
         """Generate different outputs corresponding to
         the contrasts provided e.g. z_map, t_map, effects and variance.
 
@@ -643,16 +649,11 @@ class FixedEffectsModel(BaseEstimator, TransformerMixin, CacheMixin):
                        'effect_variance', 'all']
         _check_output_type(output_type, valid_types)
 
-        # Mask inputs
-        masked_effects = self.masker_.transform(self.effect_inputs_)
-        masked_effects = np.split(masked_effects, masked_effects.shape[0])
-        masked_vars = self.masker_.transform(self.variance_inputs_)
-        masked_vars = np.split(masked_vars, masked_vars.shape[0])
-
         # Compute contrasts
+        # Abstract this to be used also by FirstLevelModel
         contrast = None
         n_contrasts = 0
-        for eff, var in zip(masked_effects, masked_vars):
+        for eff, var in zip(self.effect_inputs_, self.self._variance_inputs):
             contrast_ = Contrast(effect=eff, variance=var.squeeze())
             if contrast is None:
                 contrast = contrast_
@@ -662,6 +663,7 @@ class FixedEffectsModel(BaseEstimator, TransformerMixin, CacheMixin):
 
         contrast = contrast * (1. / n_contrasts)
 
+        # Abstract this into function shared with SecondLevelModel
         output_types = \
             valid_types[:-1] if output_type == 'all' else [output_type]
 
