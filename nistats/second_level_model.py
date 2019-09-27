@@ -28,7 +28,7 @@ from sklearn.externals.joblib import Memory
 from .first_level_model import FirstLevelModel
 from .first_level_model import run_glm
 from .regression import SimpleRegressionResults
-from .contrasts import compute_contrast
+from .contrasts import compute_contrast, Contrast
 from .utils import _basestring
 from .design_matrix import make_second_level_design_matrix
 from nistats._utils.helpers import replace_parameters
@@ -140,8 +140,8 @@ def _check_first_level_contrast(second_level_input, first_level_contrast):
 
 def _check_output_type(output_type, valid_types):
     if output_type not in valid_types:
-            raise ValueError('output_type must be one of {}'
-                             .format(valid_types))
+        raise ValueError(
+            'output_type must be one of {}'.format(valid_types))
 
 
 def _check_design_matrix(design_matrix):
@@ -232,6 +232,46 @@ def _infer_effect_maps(second_level_input, contrast_def):
         check_niimg(niimg, ensure_ndim=3)
 
     return effect_maps
+
+
+def _learn_masker(model, second_level_input):
+    """ Learn mask from input images, and model parameters """
+    # Select sample map for masker fit and get subjects_label for design
+    if isinstance(second_level_input, pd.DataFrame):
+        sample_map = second_level_input['effects_map_path'][0]
+        labels = second_level_input['subject_label']
+        subjects_label = labels.values.tolist()
+    elif isinstance(second_level_input, Nifti1Image):
+        sample_map = mean_img(second_level_input)
+    elif isinstance(second_level_input[0], FirstLevelModel):
+        sample_model = second_level_input[0]
+        sample_condition = sample_model.design_matrices_[0].columns[0]
+        sample_map = sample_model.compute_contrast(
+            sample_condition, output_type='effect_size')
+        labels = [m.subject_label for m in second_level_input]
+        subjects_label = labels
+    else:
+        # In this case design matrix had to be provided
+        sample_map = mean_img(second_level_input)
+
+    # Learn the mask. Assume the first level imgs have been masked.
+    if not isinstance(model.mask_img, NiftiMasker):
+        masker_ = NiftiMasker(
+            mask_img=model.mask_img, smoothing_fwhm=model.smoothing_fwhm,
+            memory=model.memory, verbose=max(0, model.verbose - 1),
+            memory_level=model.memory_level)
+    else:
+        masker_ = clone(model.mask_img)
+        for param_name in ['smoothing_fwhm', 'memory', 'memory_level']:
+            our_param = getattr(model, param_name)
+            if our_param is None:
+                continue
+            if getattr(model.masker_, param_name) is not None:
+                warn('Parameter %s of the masker overriden' % param_name)
+            setattr(model.masker_, param_name, our_param)
+    masker_.fit(sample_map)
+
+    return masker_, subjects_label
 
 
 class SecondLevelModel(BaseEstimator, TransformerMixin, CacheMixin):
@@ -368,46 +408,13 @@ class SecondLevelModel(BaseEstimator, TransformerMixin, CacheMixin):
             sys.stderr.write("Fitting second level model. "
                              "Take a deep breath\r")
 
-        # Select sample map for masker fit and get subjects_label for design
-        if isinstance(second_level_input, pd.DataFrame):
-            sample_map = second_level_input['effects_map_path'][0]
-            labels = second_level_input['subject_label']
-            subjects_label = labels.values.tolist()
-        elif isinstance(second_level_input, Nifti1Image):
-            sample_map = mean_img(second_level_input)
-        elif isinstance(second_level_input[0], FirstLevelModel):
-            sample_model = second_level_input[0]
-            sample_condition = sample_model.design_matrices_[0].columns[0]
-            sample_map = sample_model.compute_contrast(
-                sample_condition, output_type='effect_size')
-            labels = [model.subject_label for model in second_level_input]
-            subjects_label = labels
-        else:
-            # In this case design matrix had to be provided
-            sample_map = mean_img(second_level_input)
+        self.masker_, subjects_label = _learn_masker(self, second_level_input)
 
         # Create and set design matrix, if not given
         if design_matrix is None:
             design_matrix = make_second_level_design_matrix(subjects_label,
                                                             confounds)
         self.design_matrix_ = design_matrix
-
-        # Learn the mask. Assume the first level imgs have been masked.
-        if not isinstance(self.mask_img, NiftiMasker):
-            self.masker_ = NiftiMasker(
-                mask_img=self.mask_img, smoothing_fwhm=self.smoothing_fwhm,
-                memory=self.memory, verbose=max(0, self.verbose - 1),
-                memory_level=self.memory_level)
-        else:
-            self.masker_ = clone(self.mask_img)
-            for param_name in ['smoothing_fwhm', 'memory', 'memory_level']:
-                our_param = getattr(self, param_name)
-                if our_param is None:
-                    continue
-                if getattr(self.masker_, param_name) is not None:
-                    warn('Parameter %s of the masker overriden' % param_name)
-                setattr(self.masker_, param_name, our_param)
-        self.masker_.fit(sample_map)
 
         # Report progress
         if self.verbose > 0:
@@ -521,6 +528,149 @@ class SecondLevelModel(BaseEstimator, TransformerMixin, CacheMixin):
             contrast_name = str(con_val)
             output.header['descrip'] = (
                 '%s of contrast %s' % (output_type, contrast_name))
+            outputs[output_type_] = output
+
+        return outputs if output_type == 'all' else output
+
+
+class FixedEffectsModel(BaseEstimator, TransformerMixin, CacheMixin):
+    """ Explicit support for Fixed Effects contrasts
+
+    Parameters
+    ----------
+
+    mask_img: Niimg-like, NiftiMasker or MultiNiftiMasker object, optional,
+        Mask to be used on data. If an instance of masker is passed,
+        then its mask will be used. If no mask is given,
+        it will be computed automatically by a MultiNiftiMasker with default
+        parameters. Automatic mask computation assumes first level imgs have
+        already been masked.
+
+    smoothing_fwhm: float, optional
+        If smoothing_fwhm is not None, it gives the size in millimeters of the
+        spatial smoothing to apply to the signal.
+
+    memory: string, optional
+        Path to the directory used to cache the masking process and the glm
+        fit. By default, no caching is done. Creates instance of joblib.Memory.
+
+    memory_level: integer, optional
+        Rough estimator of the amount of memory used by caching. Higher value
+        means more memory for caching.
+
+    verbose : integer, optional
+        Indicate the level of verbosity. By default, nothing is printed.
+        If 0 prints nothing. If 1 prints final computation time.
+        If 2 prints masker computation details.
+
+    """
+    @replace_parameters({'mask': 'mask_img'}, end_version='next')
+    def __init__(self, mask_img=None, smoothing_fwhm=None,
+                 memory=Memory(None), memory_level=1, verbose=0,
+                 minimize_memory=True):
+        self.mask_img = mask_img
+        self.smoothing_fwhm = smoothing_fwhm
+        if isinstance(memory, _basestring):
+            self.memory = Memory(memory)
+        else:
+            self.memory = memory
+        self.memory_level = memory_level
+        self.verbose = verbose
+        self.minimize_memory = minimize_memory
+        self.effect_inputs_ = None
+
+    def fit(self, effect_inputs, variance_inputs):
+        """ Fit the second-level GLM
+
+        1. do a masker job: fMRI_data -> Y
+
+        Parameters
+        ----------
+        effect_inputs: list of Niimg-like objects.
+            Effect size images from a FirstLevelModel
+
+        variance_inputs: list of Niimg-like objects.
+            Variance images from a FirstLevelModel
+
+        """
+        self.effect_inputs_ = effect_inputs
+        self.variance_inputs_ = variance_inputs
+
+        # Report progress
+        t0 = time.time()
+        if self.verbose > 0:
+            sys.stderr.write("Preparing fixed effects model")
+
+        if not isinstance(effect_inputs[0], Nifti1Image):
+            raise ValueError("Input must be list of nifti images")
+
+        self.masker_, subjects_label = _learn_masker(self, effect_inputs)
+
+        # Report progress
+        if self.verbose > 0:
+            sys.stderr.write("\nComputation of second level model done in "
+                             "%i seconds\n" % (time.time() - t0))
+
+        return self
+
+    def compute_contrast(
+            self, output_type='z_score'):
+        """Generate different outputs corresponding to
+        the contrasts provided e.g. z_map, t_map, effects and variance.
+
+        Parameters
+        ----------
+        output_type: str, optional
+            Type of the output map. Can be 'z_score', 'stat', 'p_value',
+            'effect_size', 'effect_variance' or 'all'
+
+        Returns
+        -------
+        output_image: Nifti1Image
+            The desired output image(s). If ``output_type == 'all'``, then
+            the output is a dictionary of images, keyed by the type of image.
+
+        """
+        if self.effect_inputs_ is None:
+            raise ValueError('The model has not been fit yet')
+
+        # check output type
+        # 'all' is assumed to be the final entry;
+        # if adding more, place before 'all'
+        valid_types = ['z_score', 'stat', 'p_value', 'effect_size',
+                       'effect_variance', 'all']
+        _check_output_type(output_type, valid_types)
+
+        # Mask inputs
+        masked_effects = self.masker_.transform(self._effect_inputs_)
+        masked_effects = np.split(masked_effects, masked_effects.shape[0])
+        masked_vars = self.masker_.transform(self._variance_inputs_)
+        masked_vars = np.split(masked_vars, masked_vars.shape[0])
+
+        # Compute contrasts
+        contrast = None
+        n_contrasts = 0
+        for eff, var in zip(masked_effects, masked_vars):
+            contrast_ = Contrast(effect=eff, variance=var.squeeze())
+            if contrast is None:
+                contrast = contrast_
+            else:
+                contrast = contrast + contrast_
+            n_contrasts += 1
+
+        contrast = contrast * (1. / n_contrasts)
+
+        output_types = \
+            valid_types[:-1] if output_type == 'all' else [output_type]
+
+        outputs = {}
+        for output_type_ in output_types:
+            # We get desired output from contrast object
+            estimate_ = getattr(contrast, output_type_)()
+            # Prepare the returned images
+            output = self.masker_.inverse_transform(estimate_)
+            output.header['descrip'] = (
+                '%s' % (output_type))
             outputs[output_type_] = output
 
         return outputs if output_type == 'all' else output
